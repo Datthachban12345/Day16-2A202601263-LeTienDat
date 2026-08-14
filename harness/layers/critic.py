@@ -79,16 +79,58 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            # Không có claim nào để kiểm tra
+            return report
+
+        # Tìm nguồn thực của từng claim trong observed_text
+        doc_for_claim = {}
+        for doc in ctx.corpus.docs:
+            for line in doc.body.split("\n"):
+                if line.strip() in ctx.observed_text:
+                    # Tìm tất cả claims có thể đến từ dòng này
+                    for claim in claims:
+                        text = claim.get("text", "")
+                        if text in ctx.observed_text and text in line:
+                            doc_for_claim[text] = doc.doc_id
+
+        kept_claims = []
+        abstain_reason = None
+        for claim in claims:
+            text = claim.get("text", "")
+            if text in ctx.observed_text:
+                # Claim có bằng chứng, giữ nguyên
+                kept_claims.append(claim)
+            elif len(text) > 10 and " và " in text:
+                # Thử tách câu ghép (hai phần nối bằng " và ")
+                parts = text.split(" và ", 1)
+                kept_parts = []
+                for part in parts:
+                    part = part.strip()
+                    # Kiểm tra xem phần này có trong observed_text không
+                    if part in ctx.observed_text:
+                        kept_parts.append(part)
+
+                if len(kept_parts) >= 1 and kept_parts[0] in ctx.observed_text:
+                    # Có ít nhất một nửa hợp lệ
+                    abstain_reason = True
+                    for part in kept_parts:
+                        if part.strip():
+                            kept_claims.append({"text": part.strip(), "doc_id": doc_for_claim.get(part.strip(), claim.get("doc_id", ""))})
+            # Không giữ lại claim bịa
+
+        if not kept_claims:
+            # Không còn claim nào hợp lệ
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ để trả lời câu hỏi dựa trên tài liệu được cung cấp."
+        else:
+            report["claims"] = kept_claims
+            report["abstain"] = bool(abstain_reason)
+            # Cập nhật citations
+            doc_ids = list(set(c.get("doc_id", "") for c in kept_claims if c.get("doc_id")))
+            report["citations"] = sorted(set(doc_ids))
+
+        return report
